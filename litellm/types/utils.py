@@ -2,7 +2,7 @@ import json
 import time
 from enum import Enum
 from pydantic import TypeAdapter
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional, Union, ClassVar
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional, Union
 
 from openai._models import BaseModel as OpenAIObject
 from openai.types.audio.transcription_create_params import (
