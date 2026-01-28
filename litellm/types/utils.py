@@ -1,7 +1,8 @@
 import json
 import time
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional, Union
+from pydantic import TypeAdapter
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional, Union, ClassVar
 
 from openai._models import BaseModel as OpenAIObject
 from openai.types.audio.transcription_create_params import (
@@ -1636,7 +1637,16 @@ class StreamingChatCompletionChunk(OpenAIChatCompletionChunk):
         super().__init__(**kwargs)
 
 
+HAS_PYDANTIC_V2: bool
+try:
+    _choices_adapter = TypeAdapter(List[Choices])
+    _streaming_choices_adapter = TypeAdapter(List[StreamingChoices])
+    HAS_PYDANTIC_V2 = True
+except ImportError:
+    HAS_PYDANTIC_V2 = False
+
 class ModelResponseBase(OpenAIObject):
+    
     id: str
     """A unique identifier for the completion."""
 
@@ -1763,44 +1773,38 @@ class ModelResponse(ModelResponseBase):
         _response_headers=None,
         **params,
     ) -> None:
-        if stream is not None and stream is True:
+        
+        is_streaming = stream is True
+        if is_streaming:
             object = "chat.completion.chunk"
-            if choices is not None and isinstance(choices, list):
-                new_choices = []
-                for choice in choices:
-                    _new_choice = None
-                    if isinstance(choice, StreamingChoices):
-                        _new_choice = choice
-                    elif isinstance(choice, dict):
-                        _new_choice = StreamingChoices(**choice)
-                    elif isinstance(choice, BaseModel):
-                        _new_choice = StreamingChoices(**choice.model_dump())
-                    new_choices.append(_new_choice)
-                choices = new_choices
-            else:
-                choices = [StreamingChoices()]
+            TargetClass = StreamingChoices
+            adapter = _streaming_choices_adapter if HAS_PYDANTIC_V2 else None
         else:
             object = "chat.completion"
-            if choices is not None and isinstance(choices, list):
-                new_choices = []
-                for choice in choices:
-                    if isinstance(choice, Choices):
-                        _new_choice = choice  # type: ignore
-                    elif isinstance(choice, dict):
-                        _new_choice = Choices(**choice)  # type: ignore
-                    elif isinstance(choice, BaseModel):
-                        dump = (
-                            choice.model_dump()
-                            if hasattr(choice, "model_dump")
-                            else choice.dict()
-                        )
-                        _new_choice = Choices(**dump)  # type: ignore
-                    else:
-                        _new_choice = choice
-                    new_choices.append(_new_choice)
-                choices = new_choices
-            else:
-                choices = [Choices()]
+            TargetClass = Choices
+            adapter = _choices_adapter if HAS_PYDANTIC_V2 else None
+        
+        if choices:
+            processed_choices = None
+            if (
+                HAS_PYDANTIC_V2 
+                and isinstance(choices, list) 
+                and len(choices) > 0
+                and isinstance(choices[0], dict)
+            ):
+                try:
+                    processed_choices = adapter.validate_python(choices)
+                except Exception:
+                    processed_choices = None
+            
+            if processed_choices is None:
+                # SLOW PATH: Manual loop (Preserves original specific behavior)
+                processed_choices = self._process_choices(choices, TargetClass, is_streaming)
+            
+            choices = processed_choices
+        else:
+            choices = [TargetClass()]
+
         if id is None:
             id = _generate_id()
         else:
@@ -1844,6 +1848,36 @@ class ModelResponse(ModelResponseBase):
             **init_values,
             **params,
         )
+
+    def _process_choices(self, choices: list, TargetClass: Union[Choices, StreamingChoices], is_streaming: bool):
+        """
+        Handles the specific logic for converting choices list.
+        Replicates original behavior:
+        - Streaming: Appends None if type doesn't match.
+        - Non-Streaming: Appends original object if type doesn't match.
+        """
+        new_choices = []
+        for choice in choices:
+            if isinstance(choice, TargetClass):
+                new_choices.append(choice)
+                continue
+
+            converted = None
+            if isinstance(choice, dict):
+                converted = TargetClass(**choice)
+            elif isinstance(choice, BaseModel):
+                dump = choice.model_dump() if hasattr(choice, "model_dump") else choice.dict()
+                converted = TargetClass(**dump)
+
+            if converted is not None:
+                new_choices.append(converted)
+            else:
+                if is_streaming:
+                    new_choices.append(None)
+                else:
+                    new_choices.append(choice)
+        
+        return new_choices
 
     def __contains__(self, key):
         # Define custom behavior for the 'in' operator
