@@ -1692,16 +1692,21 @@ class ModelResponseStream(ModelResponseBase):
         **kwargs,
     ):
         if choices is not None and isinstance(choices, list):
-            new_choices = []
-            for choice in choices:
-                _new_choice = None
-                if isinstance(choice, StreamingChoices):
-                    _new_choice = choice
-                elif isinstance(choice, dict):
-                    _new_choice = StreamingChoices(**choice)
-                elif isinstance(choice, BaseModel):
-                    _new_choice = StreamingChoices(**choice.model_dump())
-                new_choices.append(_new_choice)
+            adapter = _streaming_choices_adapter if HAS_PYDANTIC_V2 else None
+            new_choices = None
+            if (
+                HAS_PYDANTIC_V2 
+                and len(choices) > 0
+                and isinstance(choices[0], dict)
+            ):
+                try:
+                    new_choices = adapter.validate_python(choices)
+                except Exception:
+                    new_choices = None
+            
+            if new_choices is None:
+                # SLOW PATH: Manual loop (Preserves original specific behavior)
+                new_choices = self._process_choices(choices)
             kwargs["choices"] = new_choices
         else:
             kwargs["choices"] = [StreamingChoices()]
@@ -1732,6 +1737,19 @@ class ModelResponseStream(ModelResponseBase):
         kwargs["provider_specific_fields"] = provider_specific_fields
 
         super().__init__(**kwargs)
+
+    def _process_choices(self, choices: list) -> list:
+        new_choices = []
+        for choice in choices:
+            _new_choice = None
+            if isinstance(choice, StreamingChoices):
+                _new_choice = choice
+            elif isinstance(choice, dict):
+                _new_choice = StreamingChoices(**choice)
+            elif isinstance(choice, BaseModel):
+                _new_choice = StreamingChoices(**choice.model_dump())
+            new_choices.append(_new_choice)
+        return new_choices
 
     def __contains__(self, key):
         # Define custom behavior for the 'in' operator
